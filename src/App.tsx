@@ -36,8 +36,8 @@ export default function App() {
     setBurst(true)
     setTimeout(() => setBurst(false), 130)
     try {
-      localStorage.setItem("rama_alltime", newAll)
-      localStorage.setItem("rama_daily", newDaily)
+      localStorage.setItem("rama_alltime", String(newAll))
+      localStorage.setItem("rama_daily", String(newDaily))
       localStorage.setItem("rama_day", TODAY)
     } catch {}
   }
