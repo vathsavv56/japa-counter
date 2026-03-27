@@ -1,12 +1,13 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 
-const TODAY = new Date().toISOString().slice(0, 10)
+const getToday = () => new Date().toISOString().slice(0, 10)
 
-function loadState() {
+function loadLocal() {
   try {
     const allTime = parseInt(localStorage.getItem("rama_alltime") || "0", 10)
     const savedDay = localStorage.getItem("rama_day")
-    const daily = savedDay === TODAY
+    const today = getToday()
+    const daily = savedDay === today
       ? parseInt(localStorage.getItem("rama_daily") || "0", 10)
       : 0
     return { allTime, daily }
@@ -15,17 +16,62 @@ function loadState() {
   }
 }
 
-export default function App() {
-  const [allTime, setAllTime] = useState(0)
-  const [daily, setDaily] = useState(0)
-  const [burst, setBurst] = useState(false)
-  const [loaded, setLoaded] = useState(false)
+function saveLocal(daily: number, allTime: number) {
+  try {
+    localStorage.setItem("rama_alltime", String(allTime))
+    localStorage.setItem("rama_daily", String(daily))
+    localStorage.setItem("rama_day", getToday())
+  } catch {
+    // localStorage may be unavailable in some environments
+  }
+}
 
+async function syncToServer(date: string, count: number) {
+  try {
+    const res = await fetch("/api/count", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, count }),
+    })
+    if (res.ok) {
+      localStorage.setItem("rama_synced", date)
+    }
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+// Load initial state once, outside the component to avoid setState-in-effect
+const initialState = loadLocal()
+
+export default function App() {
+  const [allTime, setAllTime] = useState(initialState.allTime)
+  const [daily, setDaily] = useState(initialState.daily)
+  const [burst, setBurst] = useState(false)
+  const [synced, setSynced] = useState(false)
+
+  // On mount, try to merge with server data
   useEffect(() => {
-    const s = loadState()
-    setAllTime(s.allTime)
-    setDaily(s.daily)
-    setLoaded(true)
+    const today = getToday()
+    Promise.allSettled([
+      fetch(`/api/count?date=${today}`).then(r => r.json()),
+      fetch("/api/total").then(r => r.json()),
+    ]).then(([dailyRes, totalRes]) => {
+      const serverDaily = dailyRes.status === "fulfilled" ? dailyRes.value.count || 0 : 0
+      const serverTotal = totalRes.status === "fulfilled" ? totalRes.value.total || 0 : 0
+
+      // Take the max of local vs server to avoid data loss
+      const local = loadLocal()
+      const bestDaily = Math.max(local.daily, serverDaily)
+      const bestAllTime = Math.max(local.allTime, serverTotal)
+
+      if (bestDaily !== local.daily || bestAllTime !== local.allTime) {
+        setDaily(bestDaily)
+        setAllTime(bestAllTime)
+        saveLocal(bestDaily, bestAllTime)
+      }
+    })
   }, [])
 
   const handleClick = () => {
@@ -35,14 +81,63 @@ export default function App() {
     setDaily(newDaily)
     setBurst(true)
     setTimeout(() => setBurst(false), 130)
-    try {
-      localStorage.setItem("rama_alltime", String(newAll))
-      localStorage.setItem("rama_daily", String(newDaily))
-      localStorage.setItem("rama_day", TODAY)
-    } catch {}
+    saveLocal(newDaily, newAll)
   }
 
-  if (!loaded) return null
+  // Sync function
+  const doSync = useCallback(() => {
+    const today = getToday()
+    const count = parseInt(localStorage.getItem("rama_daily") || "0", 10)
+    if (count > 0) {
+      syncToServer(today, count).then(ok => {
+        if (ok) setSynced(true)
+      })
+    }
+  }, [])
+
+  // 11:30 PM auto-sync — checks every 60 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = new Date()
+      const hours = now.getHours()
+      const minutes = now.getMinutes()
+      const today = getToday()
+      const alreadySynced = localStorage.getItem("rama_synced") === today
+
+      // Sync at 23:30 (11:30 PM) if not already synced today
+      if (hours === 23 && minutes >= 30 && !alreadySynced) {
+        doSync()
+      }
+
+      // Reset synced flag at midnight for the new day
+      if (hours === 0 && minutes === 0) {
+        localStorage.removeItem("rama_synced")
+        setSynced(false)
+      }
+    }, 60_000) // check every 60 seconds
+
+    return () => clearInterval(interval)
+  }, [doSync])
+
+  // Backup sync on page close/unload
+  useEffect(() => {
+    const onUnload = () => {
+      const today = getToday()
+      const count = parseInt(localStorage.getItem("rama_daily") || "0", 10)
+      if (count > 0) {
+        // sendBeacon is more reliable than fetch during unload
+        navigator.sendBeacon(
+          "/api/count",
+          new Blob(
+            [JSON.stringify({ date: today, count })],
+            { type: "application/json" }
+          )
+        )
+      }
+    }
+    window.addEventListener("beforeunload", onUnload)
+    return () => window.removeEventListener("beforeunload", onUnload)
+  }, [])
 
   return (
     <div
@@ -110,6 +205,13 @@ export default function App() {
             {allTime}
           </span>
         </div>
+
+        {/* Sync indicator */}
+        {synced && (
+          <p style={{ fontFamily: "'DM Sans', sans-serif", fontSize: "0.6rem", color: "#7cb87c", marginTop: "0.5rem", letterSpacing: "0.1em" }}>
+            ✓ synced
+          </p>
+        )}
       </div>
 
       {/* Big Button */}
